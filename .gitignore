@@ -1,3 +1,11 @@
+# saved runs
+*.flatty_nim_library
+
+# compiled
+src/recurrent_evolution.exe
+recurrent_evolution.exe
+
 nimcache/
 nimblecache/
 htmldocs/
+libopenblas.dll

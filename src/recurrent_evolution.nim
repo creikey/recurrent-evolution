@@ -1,5 +1,8 @@
 import arraymancer, print, chroma, vmath, times, chroma/transformations, algorithm, flatty, os, options
 
+when defined(profiler):
+  import nimprof
+
 const map_color = color(0.5, 0.5, 0.5)
 const creature_start_color = color(1, 1, 1)
 const map_size: float = 200.0
@@ -10,8 +13,8 @@ const creature_brain_variation: float32 = 0.4
 const creature_speed: float = 10.0
 const max_creatures: int = 256
 const reincarnate_time: float = 3.0
+const save_time: float = 30.0
 const perceived_other_creatures = 8
-const creature_dist_careabout = 25.0
 const progress_filename = "progress.flatty_nim_library"
 
 type 
@@ -59,32 +62,44 @@ proc toFlatty[T](s: var string, t: Variable[Tensor[T]]) =
   if isNil:
     return
 
-  toFlatty(s, t.value.shape)
+  let bytelen: int = t.value.byteLen
 
-  s.setLen(s.len + t.value.byteLen)
-  let dest = s[s.len - t.value.byteLen].addr
-  copyMem(dest, t.value.get_data_ptr, t.value.byteLen)
+  s.toFlatty(bytelen)
+  s.toFlatty(t.value.shape)
+  
+  if bytelen > 0:
+    s.setLen(s.len + bytelen)
+    let dest = s[s.len - bytelen].addr
+    copyMem(dest, t.value.get_data_ptr, bytelen)
 
 proc fromFlatty[T: KnownSupportsCopyMem](s: string, i: var int, x: var Variable[Tensor[T]]) =
   var isNil: bool
+  
   s.fromFlatty(i, isNil)
   if isNil:
+    # x = ctx.variable(Tensor[T]())
     return
+
+  var bytelen: int
+  s.fromFlatty(i, bytelen)
 
   var newTensor: Tensor[T]
   var shape: Metadata
-  fromFlatty(s, i, shape)
+  s.fromFlatty(i, shape)
   # newTensor.fromBuffer(s[i].addr, shape, )
   var size: int
   newTensor.initTensorMetadata(size, shape, rowMajor)
   newTensor.storage.allocCPUStorage(size)
   
+  assert(bytelen == newTensor.byteLen)
+  
   # let byteLen = newTensor.size * T.sizeof
   # newTensor.copyFromRaw(s[i].unsafeAddr, byteLen)
   # i += byteLen
 
-  copyMem(cast[ptr UncheckedArray[char]](newTensor.unsafe_raw_buf()), s[i].unsafeAddr, newTensor.byteLen)
-  i += newTensor.byteLen
+  if bytelen > 0:
+    copyMem(cast[ptr UncheckedArray[char]](newTensor.unsafe_raw_buf()), s[i].unsafeAddr, bytelen)
+    i += bytelen
 
   # let r_ptr = newTensor.unsafe_raw_buf()
   # for dataIndex in i..<(i+newTensor.size):
@@ -93,9 +108,9 @@ proc fromFlatty[T: KnownSupportsCopyMem](s: string, i: var int, x: var Variable[
 
   x = ctx.variable(newTensor)
 
-const gruHidden = 32
+const gruHidden = 8
 proc create[T](ctx: Context[Tensor[T]]): CreatureBrain[T] =
-  const gruStack = 2
+  const gruStack = 1
   result.gru = ctx.init(GRULayer[T], CreatureInputData.len, gruHidden, gruStack)
   result.memory = ctx.variable(zeros[T](gruStack, 1, gruHidden))
   result.fc1 = ctx.init(Linear[T], gruHidden, 8)
@@ -108,6 +123,9 @@ proc think[T](creature: Creature, ctx: Context[T], input: CreatureInputData): Ve
   # print creature.brain.fc1.outShape, creature.brain.fc1.inShape, tensorInput.value.shape
   var brain = creature.brain.get().unsafeAddr
   
+  # for name, value in brain.gru.fieldPairs:
+  #   print name, value != nil
+  #   print value.is_grad_needed
   let (gruOut, newMemory) = brain.gru.forward(tensorInput.reshape(1, 1, CreatureInputData.len), brain.memory)
 
   brain.memory = newMemory
@@ -149,7 +167,7 @@ proc copyBrain[T](creature: var Creature, ctx: Context[T], source: Creature) =
     # creature.brain.get().gru.weight = ctx.variable(source.brain.get().fc1.weight.value.clone())
     # creature.brain.get().gru.weight = ctx.variable(source.brain.get().fc1.weight.value.clone())
     # creature.brain.get().gru.weight = ctx.variable(source.brain.get().fc1.weight.value.clone())
-    
+  
     # creature.brain.get().fc1.weight = ctx.variable(source.brain.get().fc1.weight.value.clone())
     # creature.brain.get().fc1.bias = ctx.variable(source.brain.get().fc1.bias.value.clone())
     # creature.brain.get().fc2.weight = ctx.variable(source.brain.get().fc2.weight.value.clone())
@@ -173,7 +191,7 @@ proc mutateBrain(creature: var Creature) =
 
 type Creatures = array[max_creatures, Creature]
 
-import boxy, opengl, windy, random, options
+import boxy, opengl, windy, random
 
 let windowSize = ivec2(1280, 800)
 
@@ -263,12 +281,10 @@ proc processCreatures(creatures: var Creatures, delta: float) =
           continue
         # from zero to one, how far away and in what direction
         let rel = otherC.pos - c.pos
-        if rel.length < creature_radius:
+        if rel.lengthSq < creature_radius*creature_radius:
           c.alive = false
           creatures[ii].alive = false
           break
-        if rel.length < creature_dist_careabout:
-          continue
 
         let relPos = rel/map_size
         
@@ -279,7 +295,7 @@ proc processCreatures(creatures: var Creatures, delta: float) =
       if not c.alive:
         continue
       toSort.sort(proc (x, y: OtherCreatureInput): int =
-        system.cmp[float32](x.relPos.length, y.relPos.length)
+        system.cmp[float32](x.relPos.lengthSq, y.relPos.lengthSq)
       )
 
       var inputData = CreatureInput(myPos: c.pos/map_size)
@@ -301,9 +317,11 @@ proc processCreatures(creatures: var Creatures, delta: float) =
       else:
         movement = movement.normalize()
       c.pos = c.pos + movement*creature_speed*delta
-      c.pos.x = clamp(c.pos.x, 0.0, map_size)
-      c.pos.y = clamp(c.pos.y, 0.0, map_size)
-      c.aliveTime += delta
+      if c.pos.x < 0.0 or c.pos.x > map_size or
+         c.pos.y < 0.0 or c.pos.y > map_size:
+        c.alive = false
+      else:
+        c.aliveTime += delta
 
 var render: bool = true
 
@@ -319,7 +337,7 @@ window.onFrame = proc() =
   while cpuTime() - start <= 1.0/60.0:
     processCreatures(creatures, 1.0/60.0)
 
-  if cpuTime() - printedTime > 30.0:
+  if cpuTime() - printedTime > save_time:
     var avgAge: float = 0.0
     for c in creatures:
       avgAge += c.aliveTime

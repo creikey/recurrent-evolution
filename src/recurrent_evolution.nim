@@ -114,8 +114,8 @@ proc fromFlatty[T: KnownSupportsCopyMem](s: string, i: var int, x: var Variable[
   x = ctx.variable(newTensor)
 
 const gruHidden = 8
+const gruStack = 1
 proc create[T](ctx: Context[Tensor[T]]): CreatureBrain[T] =
-  const gruStack = 1
   result.gru = ctx.init(GRULayer[T], CreatureInputData.len, gruHidden, gruStack)
   result.memory = ctx.variable(zeros[T](gruStack, 1, gruHidden))
   result.fc1 = ctx.init(Linear[T], gruHidden, 8)
@@ -378,10 +378,18 @@ window.onFrame = proc() =
   if cpuTime() - printedTime > save_time:
     # printresults()
     var avgAge: float = 0.0
+    var bestCreatureMemory: Variable[Tensor[float32]] = nil
+    var longestLife: float = 0.0
     for c in world.creatures:
-      avgAge += c.aliveTime
+      if c.alive:
+        avgAge += c.aliveTime
+        if c.aliveTime > longestLife:
+          longestLife = c.aliveTime
+          bestCreatureMemory = c.brain.get().memory
     avgAge /= world.creatures.len().float
-    echo processedTime, " ", avgAge
+
+    assert(gruStack == 1)
+    echo processedTime, "|", avgAge, "|", longestLife, "|", bestCreatureMemory.value.reshape(gruHidden).toSeq1D()
     printedTime = cpuTime()
     writeFile(progress_filename, toFlatty(world))
 

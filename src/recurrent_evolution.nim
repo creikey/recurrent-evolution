@@ -1,4 +1,4 @@
-import arraymancer, print, chroma, vmath, times, chroma/transformations, algorithm, flatty, os, options
+import arraymancer, print, chroma, vmath, times, chroma/transformations, algorithm, flatty, os, options, kdtree
 
 import profile
 
@@ -52,6 +52,9 @@ type
     babyTime: float
     aliveTime: float
     pos: Vec2
+  World = object
+    creatures: array[max_creatures, Creature]
+    totalTime: float
 
 let ctx = arraymancer.newContext(Tensor[float32])
 
@@ -191,8 +194,6 @@ proc mutateBrain(creature: var Creature) =
   mutateTensor(creature.brain.get().fc2.weight)
   mutateTensor(creature.brain.get().fc2.bias)
 
-type Creatures = array[max_creatures, Creature]
-
 import boxy, opengl, windy, random
 
 let windowSize = ivec2(1280, 800)
@@ -222,8 +223,8 @@ proc draw(creature: Creature) =
   bxy.drawImage("circle", rect=rect(creature.pos-desired_size/2.0, desired_size), tint=creature.col)
 
 
-func newCreature(creatures: var Creatures): Option[ptr Creature] =
-  for c in creatures.mitems:
+func newCreature(world: var World): Option[ptr Creature] =
+  for c in world.creatures.mitems:
     if not c.alive:
       return some[ptr Creature](c.addr)
   return none[ptr Creature]()
@@ -243,7 +244,8 @@ proc babyCreature(c: Creature): Creature =
   result.col.b = randomizeColor(result.col.b)
   result.col.a = 1.0
 
-var creatures: Creatures
+
+var world: World
 
 proc initCreature(c: ptr Creature) =
   c.alive = true
@@ -253,68 +255,85 @@ proc initCreature(c: ptr Creature) =
   c.babyTime = 0.0
 
 if fileExists(progress_filename):
-  creatures = fromFlatty(readFile(progress_filename), Creatures)
+  world = fromFlatty(readFile(progress_filename), World)
 else:
   # initialize some creatures
   assert(init_creatures < max_creatures)
   randomize()
   for _ in 0..init_creatures-1:
-    let c = creatures.newCreature().get()
+    let c = world.newCreature().get()
     c.initCreature()
 
 var reincarnationTimer = 0.0
 
-proc processCreatures(creatures: var Creatures, delta: float) =
+proc processWorld(world: var World, delta: float) =
+  world.totalTime += delta
   reincarnationTimer += delta
   var toReincarnate = -1
   if reincarnationTimer > reincarnate_time:
-    toReincarnate = rand(creatures.len-1)
+    toReincarnate = rand(world.creatures.len-1)
     reincarnationTimer = 0.0
-  for i, c in creatures.mpairs:
+
+  var creaturePoints = newSeq[KdPoint]()
+  var creatureValues = newSeq[Creature]()
+  for c in world.creatures:
+    if c.alive:
+      creaturePoints.add([c.pos.x.float, c.pos.y.float].KdPoint)
+      creatureValues.add(c)
+  var tree = newKdTree[Creature](creaturePoints, creatureValues)
+
+  for i, c in world.creatures.mpairs:
     if i == toReincarnate:
       c.addr.initCreature()
     if c.alive:
       c.babyTime += delta
       if c.babyTime > creature_reproduce_time:
         c.babyTime = 0.0
-        let possibleCreature = creatures.newCreature()
+        let possibleCreature = world.newCreature()
         if possibleCreature.isSome():
           possibleCreature.get()[] = babyCreature(c)
       
-      profile "See the world":
-        var toSort: seq[OtherCreatureInput]
+      when false: profile "See the world":
+        var closestCreatures: seq[OtherCreatureInput]
 
-        for ii, otherC in creatures.pairs:
+        for ii, otherC in world.creatures.pairs:
           if ii == i or not c.alive:
             continue
           # from zero to one, how far away and in what direction
           let rel = otherC.pos - c.pos
           if rel.lengthSq < creature_radius*creature_radius:
             c.alive = false
-            creatures[ii].alive = false
+            world.creatures[ii].alive = false
             break
 
           let relPos = rel/map_size
           
-          toSort.add(OtherCreatureInput(
+          closestCreatures.add(OtherCreatureInput(
             relPos: relPos,
             hue: otherC.col.asHsv().h,
           ))
         if not c.alive:
           continue
-        toSort.sort(proc (x, y: OtherCreatureInput): int =
+        closestCreatures.sort(proc (x, y: OtherCreatureInput): int =
           system.cmp[float32](x.relPos.lengthSq, y.relPos.lengthSq)
         )
 
-        var inputData = CreatureInput(myPos: c.pos/map_size)
-        for i in 0..high(inputData.otherCreatures):
-          if i < toSort.len:
-            inputData.otherCreatures[i] = toSort[i]
-          else:
-            inputData.otherCreatures[i] = OtherCreatureInput(
-              relPos: vec2(1.0, 1.0),
-              hue: 1.0,
-            )
+      var inputData = CreatureInput(myPos: c.pos/map_size)
+
+      var closestCreatures = tree.nearestNeighbours([c.pos.x.float, c.pos.y.float], inputData.otherCreatures.len)
+
+      for i in 0..high(inputData.otherCreatures):
+        if i < closestCreatures.len:
+          let closestResult: Creature = closestCreatures[i][1]
+          inputData.otherCreatures[i] = OtherCreatureInput(
+            relPos: (closestResult.pos - c.pos)/map_size,
+            hue: closestResult.col.asHsv().h,
+          )
+        else:
+          inputData.otherCreatures[i] = OtherCreatureInput(
+            relPos: vec2(1.0, 1.0),
+            hue: 1.0,
+          )
       # c.pos = c.pos + vec2(rand(2.0)-1.0, rand(2.0)-1.0).normalized()*creature_speed*delta
       var movement = vec2(0.0)
       profile "Creature thinking":
@@ -333,13 +352,13 @@ proc processCreatures(creatures: var Creatures, delta: float) =
           result = pos - map_size
         else:
           result = pos
-      c.pos.x = wrapPos(c.pos.x)
-      c.pos.y = wrapPos(c.pos.y)
-      # if c.pos.x < 0.0 or c.pos.x > map_size or
-      #    c.pos.y < 0.0 or c.pos.y > map_size:
-      #   c.alive = false
-      # else:
-      c.aliveTime += delta
+      # c.pos.x = wrapPos(c.pos.x)
+      # c.pos.y = wrapPos(c.pos.y)
+      if c.pos.x < 0.0 or c.pos.x > map_size or
+         c.pos.y < 0.0 or c.pos.y > map_size:
+        c.alive = false
+      else:
+        c.aliveTime += delta
 
 var render: bool = true
 
@@ -347,25 +366,24 @@ window.onButtonPress = proc(button: Button) =
   if button == KeyZ:
     render = not render
 
-var beganTime = cpuTime()
 var printedTime = cpuTime()
 var processedTime = 0.0
 
 window.onFrame = proc() =
   let start = cpuTime()
   while cpuTime() - start <= 1.0/60.0:
-    processCreatures(creatures, timestep)
+    processWorld(world, timestep)
     processedTime += timestep
 
   if cpuTime() - printedTime > save_time:
     # printresults()
     var avgAge: float = 0.0
-    for c in creatures:
+    for c in world.creatures:
       avgAge += c.aliveTime
-    avgAge /= creatures.len().float
+    avgAge /= world.creatures.len().float
     echo processedTime, " ", avgAge
     printedTime = cpuTime()
-    writeFile(progress_filename, toFlatty(creatures))
+    writeFile(progress_filename, toFlatty(world))
 
 
   # Clear the screen and begin a new frame.
@@ -375,7 +393,7 @@ window.onFrame = proc() =
   bxy.saveTransform()
   bxy.scale(vec2(3,3))
   bxy.drawRect(rect(0,0,map_size, map_size), map_color)
-  for c in creatures:
+  for c in world.creatures:
     if c.alive:
       c.draw()
   bxy.restoreTransform()

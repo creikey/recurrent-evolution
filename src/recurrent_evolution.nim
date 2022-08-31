@@ -1,20 +1,22 @@
 import arraymancer, print, chroma, vmath, times, chroma/transformations, algorithm, flatty, os, options
 
-when defined(profiler):
-  import nimprof
+import profile
+
 
 const map_color = color(0.5, 0.5, 0.5)
 const creature_start_color = color(1, 1, 1)
 const map_size: float = 200.0
 const init_creatures = 50
 const creature_radius: float = 0.5
+const baby_distance: float = 4.0*creature_radius
 const creature_reproduce_time: float = 0.4
-const creature_brain_variation: float32 = 0.4
+const creature_brain_variation: float32 = 0.05
 const creature_speed: float = 10.0
 const max_creatures: int = 256
 const reincarnate_time: float = 3.0
 const save_time: float = 30.0
 const perceived_other_creatures = 8
+const timestep: float = 1.0/15.0
 const progress_filename = "progress.flatty_nim_library"
 
 type 
@@ -206,8 +208,13 @@ let bxy = newBoxy()
 let circleImg = newImage(32, 32)
 block:
   let ctx = newContext(circleImg)
+  ctx.fillStyle.color = color(0, 0, 0, 1)
+  const outlineSize = 3.0
+  let outerCircle = circle(vec2(circleImg.width.float, circleImg.height.float)/2.0, circleImg.width.float/2.0)
+  ctx.fillCircle(outerCircle)
   ctx.fillStyle.color = color(1, 1, 1, 1)
-  ctx.fillCircle(circle(vec2(circleImg.width.float, circleImg.height.float)/2.0, circleImg.width.float/2.0))
+
+  ctx.fillCircle(circle(outerCircle.pos, outerCircle.radius - outlineSize))
 
 bxy.addImage("circle", circleImg)
 proc draw(creature: Creature) =
@@ -224,7 +231,7 @@ func newCreature(creatures: var Creatures): Option[ptr Creature] =
 proc babyCreature(c: Creature): Creature =
   let theta = rand(2.0*PI)
   result.alive = true
-  result.pos =c.pos + vec2(cos(theta),sin(theta))*creature_radius*2.0
+  result.pos =c.pos + vec2(cos(theta),sin(theta))*baby_distance
   result.col = c.col
   result.copyBrain(ctx, c)
   result.mutateBrain()
@@ -274,54 +281,65 @@ proc processCreatures(creatures: var Creatures, delta: float) =
         if possibleCreature.isSome():
           possibleCreature.get()[] = babyCreature(c)
       
-      var toSort: seq[OtherCreatureInput]
+      profile "See the world":
+        var toSort: seq[OtherCreatureInput]
 
-      for ii, otherC in creatures.pairs:
-        if ii == i or not c.alive:
+        for ii, otherC in creatures.pairs:
+          if ii == i or not c.alive:
+            continue
+          # from zero to one, how far away and in what direction
+          let rel = otherC.pos - c.pos
+          if rel.lengthSq < creature_radius*creature_radius:
+            c.alive = false
+            creatures[ii].alive = false
+            break
+
+          let relPos = rel/map_size
+          
+          toSort.add(OtherCreatureInput(
+            relPos: relPos,
+            hue: otherC.col.asHsv().h,
+          ))
+        if not c.alive:
           continue
-        # from zero to one, how far away and in what direction
-        let rel = otherC.pos - c.pos
-        if rel.lengthSq < creature_radius*creature_radius:
-          c.alive = false
-          creatures[ii].alive = false
-          break
+        toSort.sort(proc (x, y: OtherCreatureInput): int =
+          system.cmp[float32](x.relPos.lengthSq, y.relPos.lengthSq)
+        )
 
-        let relPos = rel/map_size
-        
-        toSort.add(OtherCreatureInput(
-          relPos: relPos,
-          hue: otherC.col.asHsv().h,
-        ))
-      if not c.alive:
-        continue
-      toSort.sort(proc (x, y: OtherCreatureInput): int =
-        system.cmp[float32](x.relPos.lengthSq, y.relPos.lengthSq)
-      )
-
-      var inputData = CreatureInput(myPos: c.pos/map_size)
-      for i in 0..high(inputData.otherCreatures):
-        if i < toSort.len:
-          inputData.otherCreatures[i] = toSort[i]
-        else:
-          inputData.otherCreatures[i] = OtherCreatureInput(
-            relPos: vec2(1.0, 1.0),
-            hue: 1.0,
-          )
+        var inputData = CreatureInput(myPos: c.pos/map_size)
+        for i in 0..high(inputData.otherCreatures):
+          if i < toSort.len:
+            inputData.otherCreatures[i] = toSort[i]
+          else:
+            inputData.otherCreatures[i] = OtherCreatureInput(
+              relPos: vec2(1.0, 1.0),
+              hue: 1.0,
+            )
       # c.pos = c.pos + vec2(rand(2.0)-1.0, rand(2.0)-1.0).normalized()*creature_speed*delta
       var movement = vec2(0.0)
-      ctx.no_grad_mode:
-        movement = c.think(ctx, inputData.toData())
+      profile "Creature thinking":
+        ctx.no_grad_mode:
+            movement = c.think(ctx, inputData.toData())
       # movement = vec2(1.0, 0.0)
       if movement.length < 0.0001:
         movement = vec2(0.0)
       else:
         movement = movement.normalize()
       c.pos = c.pos + movement*creature_speed*delta
-      if c.pos.x < 0.0 or c.pos.x > map_size or
-         c.pos.y < 0.0 or c.pos.y > map_size:
-        c.alive = false
-      else:
-        c.aliveTime += delta
+      proc wrapPos(pos: float): float =
+        if pos < 0.0:
+          result = map_size + pos
+        elif pos > map_size:
+          result = pos - map_size
+        else:
+          result = pos
+      c.pos.x = wrapPos(c.pos.x)
+      c.pos.y = wrapPos(c.pos.y)
+      # if c.pos.x < 0.0 or c.pos.x > map_size or
+      #    c.pos.y < 0.0 or c.pos.y > map_size:
+      #   c.alive = false
+      # else:
+      c.aliveTime += delta
 
 var render: bool = true
 
@@ -331,18 +349,21 @@ window.onButtonPress = proc(button: Button) =
 
 var beganTime = cpuTime()
 var printedTime = cpuTime()
+var processedTime = 0.0
 
 window.onFrame = proc() =
   let start = cpuTime()
   while cpuTime() - start <= 1.0/60.0:
-    processCreatures(creatures, 1.0/60.0)
+    processCreatures(creatures, timestep)
+    processedTime += timestep
 
   if cpuTime() - printedTime > save_time:
+    # printresults()
     var avgAge: float = 0.0
     for c in creatures:
       avgAge += c.aliveTime
     avgAge /= creatures.len().float
-    echo cpuTime() - beganTime, " ", avgAge
+    echo processedTime, " ", avgAge
     printedTime = cpuTime()
     writeFile(progress_filename, toFlatty(creatures))
 

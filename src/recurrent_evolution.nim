@@ -1,7 +1,10 @@
-import arraymancer, print, chroma, vmath, times, chroma/transformations, algorithm, flatty, os, options, kdtree
+import arraymancer, print, chroma, vmath, chroma/transformations, algorithm, flatty, os, options, kdtree, std/monotimes
 
 import profile
 
+proc now(): float64 =
+  ## Gets current time
+  getMonoTime().ticks.float64 / 1000000000.0
 
 const map_color = color(0.5, 0.5, 0.5)
 const creature_start_color = color(1, 1, 1)
@@ -276,13 +279,14 @@ proc processWorld(world: var World, delta: float) =
     toReincarnate = rand(world.creatures.len-1)
     reincarnationTimer = 0.0
 
-  var creaturePoints = newSeq[KdPoint]()
-  var creatureValues = newSeq[Creature]()
-  for c in world.creatures:
-    if c.alive:
-      creaturePoints.add([c.pos.x.float, c.pos.y.float].KdPoint)
-      creatureValues.add(c)
-  var tree = newKdTree[Creature](creaturePoints, creatureValues)
+  profile "KdTree construction":
+    var creaturePoints = newSeq[KdPoint]()
+    var creatureValues = newSeq[Creature]()
+    for c in world.creatures:
+      if c.alive:
+        creaturePoints.add([c.pos.x.float, c.pos.y.float].KdPoint)
+        creatureValues.add(c)
+    var tree = newKdTree[Creature](creaturePoints, creatureValues)
 
   for i, c in world.creatures.mpairs:
     if i == toReincarnate:
@@ -342,28 +346,29 @@ proc processWorld(world: var World, delta: float) =
         ctx.no_grad_mode:
             movement = c.think(ctx, inputData.toData())
       # movement = vec2(1.0, 0.0)
-      if movement.length < 0.0001:
-        movement = vec2(0.0)
-      else:
-        movement = movement.normalize()
-      c.pos = c.pos + movement*creature_speed*delta
-      proc wrapPos(pos: float): float =
-        if pos < 0.0:
-          result = map_size + pos
-        elif pos > map_size:
-          result = pos - map_size
+      profile "Wrapping":
+        if movement.length < 0.0001:
+          movement = vec2(0.0)
         else:
-          result = pos
-      # c.pos.x = wrapPos(c.pos.x)
-      # c.pos.y = wrapPos(c.pos.y)
-      if c.pos.x < 0.0 or c.pos.x > map_size or
-         c.pos.y < 0.0 or c.pos.y > map_size:
-        c.alive = false
-      else:
-        c.aliveTime += delta
+          movement = movement.normalize()
+        c.pos = c.pos + movement*creature_speed*delta
+        proc wrapPos(pos: float): float =
+          if pos < 0.0:
+            result = map_size + pos
+          elif pos > map_size:
+            result = pos - map_size
+          else:
+            result = pos
+        # c.pos.x = wrapPos(c.pos.x)
+        # c.pos.y = wrapPos(c.pos.y)
+        if c.pos.x < 0.0 or c.pos.x > map_size or
+          c.pos.y < 0.0 or c.pos.y > map_size:
+          c.alive = false
+        else:
+          c.aliveTime += delta
 
 var asFastAsPossible: bool = false
-var lastTickTime = cpuTime()
+var lastTickTime = now()
 
 type Camera = object
   translation: Vec2
@@ -376,14 +381,16 @@ func worldToScreen(c: Camera): GMat3[float32] =
   c.screenToWorld().inverse()
 
 var cam = Camera(scale: 1.0 / 3.0)
-var printedTime = cpuTime()
+var printedTime = now()
 var processedTime = 0.0
 
 window.onButtonPress = proc(button: Button) =
   if button == KeySpace:
     asFastAsPossible = not asFastAsPossible
     if not asFastAsPossible:
-      lastTickTime = cpuTime()
+      lastTickTime = now()
+  elif button == KeyP:
+    printresults()
 
 window.onFrame = proc() =
   if window.buttonDown[MouseMiddle] or window.buttonDown[MouseRight]:
@@ -403,18 +410,18 @@ window.onFrame = proc() =
       break
 
   if asFastAsPossible:
-    let start = cpuTime()
-    while cpuTime() - start <= 1.0/60.0:
+    let start = now()
+    while now() - start <= 1.0/60.0:
       processWorld(world, timestep)
       processedTime += timestep
   else:
-    while cpuTime() > lastTickTime:
+    let curNow = now()
+    while curNow > lastTickTime:
       processWorld(world, timestep)
       lastTickTime += timestep
       processedTime += timestep
   
-  if cpuTime() - printedTime > save_time:
-    # printresults()
+  if now() - printedTime > save_time:
     var avgAge: float = 0.0
     var bestCreatureMemory: Variable[Tensor[float32]] = nil
     var longestLife: float = 0.0
@@ -428,7 +435,7 @@ window.onFrame = proc() =
 
     assert(gruStack == 1)
     echo processedTime, "|", avgAge, "|", longestLife, "|", bestCreatureMemory.value.reshape(gruHidden).toSeq1D()
-    printedTime = cpuTime()
+    printedTime = now()
     writeFile(progress_filename, toFlatty(world))
 
 

@@ -1,6 +1,6 @@
-import times, deques, tables, options, math
+import deques, tables, options, math, std/monotimes
 
-const maxSamples: int = 300
+const maxSamples: int = 1000
 
 type 
   ExecutingBlock = object
@@ -9,38 +9,43 @@ type
     average: float
     stddev: float
 
+proc now(): float64 =
+  ## Gets current time
+  getMonoTime().ticks.float64 / 1000000000.0
+
 var samples = initTable[string, Deque[float]]()
 var executingStack = newSeq[ExecutingBlock]()
-var lastTotalTime = none[float]()
+var lastTotalTime = none(float)
 
 proc profileStart*(name: string) = 
   executingStack.add(ExecutingBlock(
-    startTime: cpuTime(),
+    startTime: now(),
   ))
   if not samples.contains(name):
     samples[name] = initDeque[float](maxSamples)
 
 proc profileEnd*(name: string) =
-  var totalTime = cpuTime() - executingStack.pop().startTime
+  var totalTime = now() - executingStack.pop().startTime
   if lastTotalTime.isSome():
-    let newLastTotalTime = some[float](totalTime)
+    let newLastTotalTime = some(totalTime)
     totalTime -= lastTotalTime.get()
     lastTotalTime = newLastTotalTime
   else:
-    lastTotalTime = some[float](totalTime)
+    lastTotalTime = some(totalTime)
   
   if executingStack.len == 0:
-    lastTotalTime = none[float]()
+    lastTotalTime = none(float)
 
   samples[name].addLast(totalTime)
 
 template profile*(name: string, body: untyped) =
-  profileStart(name)
+  when defined(profiling):
+    profileStart(name)
 
   body
 
-  profileEnd(name)
-  
+  when defined(profiling):
+    profileEnd(name)
 
 proc results*(): Table[string, TimeResult] =
   result = initTable[string, TimeResult]()
@@ -62,10 +67,11 @@ proc results*(): Table[string, TimeResult] =
     )
 
 proc printresults*() =
-  echo "Profiled block | Average | Standard Deviation"
-  let r = results()
-  for s in r.keys():
-    echo s, " | ", r[s].average, " | ", r[s].stddev
+  when defined(profiling):
+    echo "Profiled block | Average | Standard Deviation"
+    let r = results()
+    for s in r.keys():
+      echo s, " | ", r[s].average, " | ", r[s].stddev
 
 when isMainModule:
   import os

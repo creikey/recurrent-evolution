@@ -13,7 +13,7 @@ const creature_reproduce_time: float = 0.4
 const creature_brain_variation: float32 = 0.05
 const creature_speed: float = 10.0
 const max_creatures: int = 256
-const reincarnate_time: float = 3.0
+const reincarnate_time: float = 5.0
 const save_time: float = 30.0
 const perceived_other_creatures = 8
 const timestep: float = 1.0/15.0
@@ -218,9 +218,11 @@ block:
   ctx.fillCircle(circle(outerCircle.pos, outerCircle.radius - outlineSize))
 
 bxy.addImage("circle", circleImg)
-proc draw(creature: Creature) =
-  let desired_size = vec2(creature_radius*2.0)
-  bxy.drawImage("circle", rect=rect(creature.pos-desired_size/2.0, desired_size), tint=creature.col)
+
+proc draw(creature: Creature, beingHovered: bool) =
+  var desiredSize = vec2(creature_radius*2.0)
+  if beingHovered: desiredSize *= 1.5
+  bxy.drawImage("circle", rect=rect(creature.pos-desiredSize/2.0, desiredSize), tint=creature.col)
 
 
 func newCreature(world: var World): Option[ptr Creature] =
@@ -360,21 +362,57 @@ proc processWorld(world: var World, delta: float) =
       else:
         c.aliveTime += delta
 
-var render: bool = true
+var asFastAsPossible: bool = false
+var lastTickTime = cpuTime()
 
-window.onButtonPress = proc(button: Button) =
-  if button == KeyZ:
-    render = not render
+type Camera = object
+  translation: Vec2
+  scale: float
 
+func screenToWorld(c: Camera): GMat3[float32] =
+  scale(vec2(c.scale)) * translate(c.translation)
+
+func worldToScreen(c: Camera): GMat3[float32] =
+  c.screenToWorld().inverse()
+
+var cam = Camera(scale: 1.0 / 3.0)
 var printedTime = cpuTime()
 var processedTime = 0.0
 
-window.onFrame = proc() =
-  let start = cpuTime()
-  while cpuTime() - start <= 1.0/60.0:
-    processWorld(world, timestep)
-    processedTime += timestep
+window.onButtonPress = proc(button: Button) =
+  if button == KeySpace:
+    asFastAsPossible = not asFastAsPossible
+    if not asFastAsPossible:
+      lastTickTime = cpuTime()
 
+window.onFrame = proc() =
+  if window.buttonDown[MouseMiddle] or window.buttonDown[MouseRight]:
+    cam.translation -= window.mouseDelta.vec2
+
+  block:
+    let zoomDelta = 1.0 + (-window.scrollDelta.y)*0.1
+    let before = cam.screenToWorld() * window.mousePos.vec2
+    cam.scale *= zoomDelta
+    cam.translation += (cam.worldToScreen() * before) - window.mousePos.vec2
+
+  var hoveringIndex = -1
+  for i in countdown(high(world.creatures), low(world.creatures)): # reverse order so creature drawn on top gets mouse hover
+    let c = world.creatures[i]
+    if (cam.screenToWorld() * window.mousePos.vec2).dist(c.pos) < creature_radius:
+      hoveringIndex = i
+      break
+
+  if asFastAsPossible:
+    let start = cpuTime()
+    while cpuTime() - start <= 1.0/60.0:
+      processWorld(world, timestep)
+      processedTime += timestep
+  else:
+    while cpuTime() > lastTickTime:
+      processWorld(world, timestep)
+      lastTickTime += timestep
+      processedTime += timestep
+  
   if cpuTime() - printedTime > save_time:
     # printresults()
     var avgAge: float = 0.0
@@ -397,13 +435,12 @@ window.onFrame = proc() =
   # Clear the screen and begin a new frame.
   bxy.beginFrame(window.size)
 
-
   bxy.saveTransform()
-  bxy.scale(vec2(3,3))
+  bxy.applyTransform(cam.worldToScreen()) # draw in world coordinates
   bxy.drawRect(rect(0,0,map_size, map_size), map_color)
-  for c in world.creatures:
+  for i, c in world.creatures.pairs:
     if c.alive:
-      c.draw()
+      c.draw(i == hoveringIndex)
   bxy.restoreTransform()
 
   bxy.endFrame()
